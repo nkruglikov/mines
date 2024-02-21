@@ -46,7 +46,9 @@ impl Grid {
     }
 
     fn sum_neighbors(&self, index: IndexPair) -> u16 {
-        self.around(index).map(|(_, value)| if value {1} else {0}).sum()
+        self.around(index)
+            .map(|(_, value)| if value { 1 } else { 0 })
+            .sum()
     }
 
     fn around(&self, index: IndexPair) -> GridIterator {
@@ -171,17 +173,29 @@ impl GameState {
             for col in 0..self.mines.size.col {
                 let index = IndexPair { row: row, col: col };
                 if !self.opened.get(index) {
-                    let bg_color = if (col + row) % 2 == 0 { grey_closed } else { white_closed };
+                    let bg_color = if (col + row) % 2 == 0 {
+                        grey_closed
+                    } else {
+                        white_closed
+                    };
                     queue!(self.stdout, SetBackgroundColor(bg_color), Print("  "));
                     continue;
                 }
-                let bg_color = if (col + row) % 2 == 0 { grey_opened } else { white_opened };
+                let bg_color = if (col + row) % 2 == 0 {
+                    grey_opened
+                } else {
+                    white_opened
+                };
                 queue!(self.stdout, SetBackgroundColor(bg_color));
                 if self.mines.get(index) {
                     queue!(self.stdout, SetForegroundColor(red), Print(" X"));
                 } else {
                     let n = self.mines.sum_neighbors(index);
-                    let msg = if n > 0 { format!(" {}", n) } else { "  ".to_string() };
+                    let msg = if n > 0 {
+                        format!(" {}", n)
+                    } else {
+                        "  ".to_string()
+                    };
                     queue!(self.stdout, SetForegroundColor(blue), Print(msg.as_str()));
                 }
             }
@@ -216,9 +230,9 @@ fn open_field(opened: &mut Grid, mines: &Grid, index: IndexPair) {
     if mines.get(index) || mines.sum_neighbors(index) > 0 {
         return;
     }
-    for r in index.row.saturating_sub(1)..=min(index.row + 1, opened.size.col- 1) {
+    for r in index.row.saturating_sub(1)..=min(index.row + 1, opened.size.col - 1) {
         for c in index.col.saturating_sub(1)..=min(index.col + 1, opened.size.row - 1) {
-            let index = IndexPair {row: r, col: c};
+            let index = IndexPair { row: r, col: c };
             if !opened.get(index) && !mines.get(index) {
                 open_field(opened, mines, index);
             }
@@ -231,7 +245,7 @@ fn main() -> std::io::Result<()> {
     enable_raw_mode()?;
     execute!(stdout(), EnableMouseCapture, EnterAlternateScreen, Hide)?;
 
-    let mut game = GameState::new(IndexPair {row: 10, col: 10}, 10);
+    let mut game = GameState::new(IndexPair { row: 10, col: 10 }, 10);
 
     // event loop
     loop {
