@@ -119,12 +119,13 @@ struct Field {
 
     mines: Grid,
     opened: Grid,
-    //flags: Grid,
+    flags: Grid,
 }
 
 struct FieldItem {
     is_opened: bool,
     is_mined: bool,
+    is_flagged: bool,
 }
 
 impl Field {
@@ -136,7 +137,7 @@ impl Field {
 
             mines: Grid::new(size),
             opened: Grid::new(size),
-            //flags: Grid::new(size),
+            flags: Grid::new(size),
         }
     }
 
@@ -160,7 +161,15 @@ impl Field {
         if !self.are_mines_allocated {
             self.allocate_mines(index);
         }
-        self.open_at(index);
+        if !self.flags.get(index) {
+            self.open_at(index);
+        }
+    }
+
+    fn handle_force_click(&mut self, index: IndexPair) {
+        if !self.opened.get(index) {
+            self.flags.set(index, !self.flags.get(index));
+        }
     }
 
     fn open_at(&mut self, index: IndexPair) {
@@ -168,6 +177,7 @@ impl Field {
             return;
         }
         self.opened.set(index, true);
+        self.flags.set(index, false);
         if self.mines.get(index) || self.mines.sum_neighbors(index) > 0 {
             return;
         }
@@ -186,9 +196,16 @@ impl Field {
                 FieldItem {
                     is_opened: self.opened.get(index),
                     is_mined: self.mines.get(index),
+                    is_flagged: self.flags.get(index),
                 },
             )
         })
+    }
+
+    fn count_flags(&self) -> u16 {
+        GridIterator::all(self.size)
+            .map(|index| if self.flags.get(index) { 1 } else { 0 })
+            .sum()
     }
 }
 
@@ -207,41 +224,32 @@ impl GameState {
         }
     }
 
-    fn handle_key(&mut self, event: &KeyEvent) -> std::io::Result<()> {
-        self.report(format!("{:?}", event).as_str())?;
-        Ok(())
-    }
-
     fn handle_mouse(&mut self, event: &MouseEvent) -> std::io::Result<()> {
-        self.report(format!("{:?}", event).as_str())?;
-        if let MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
+        let mouse_index = IndexPair {
+            row: event.row,
+            col: event.column,
+        };
+        let Some(index) = self.convert_absolute_to_relative(mouse_index) else {
+            return Ok(());
+        };
+        let MouseEvent {
+            kind: MouseEventKind::Down(button),
+            modifiers,
             ..
         } = event
-        {
-            if let Some(index) = self.convert_absolute_to_relative(IndexPair {
-                row: *row,
-                col: *column,
-            }) {
-                self.field.handle_click(index);
-            }
+        else {
+            return Ok(());
+        };
+        match (*button, *modifiers) {
+            (MouseButton::Left, KeyModifiers::NONE) => self.field.handle_click(index),
+            (MouseButton::Left, KeyModifiers::SHIFT) => self.field.handle_force_click(index),
+            (MouseButton::Right, KeyModifiers::NONE) => self.field.handle_force_click(index),
+            _ => (),
         }
         Ok(())
     }
 
-    fn report(&mut self, text: &str) -> std::io::Result<()> {
-        queue!(
-            self.stdout,
-            MoveTo(0, 0),
-            Clear(ClearType::CurrentLine),
-            Print(text),
-        )?;
-        Ok(())
-    }
-
-    fn draw(&mut self) -> std::io::Result<()> {
+    fn draw_field(&mut self) -> std::io::Result<()> {
         let blue = Color::AnsiValue(21);
         let red = Color::AnsiValue(196);
         let white_opened = Color::AnsiValue(231);
@@ -254,6 +262,7 @@ impl GameState {
             FieldItem {
                 is_opened,
                 is_mined,
+                is_flagged,
             },
         ) in self.field.iter()
         {
@@ -265,11 +274,12 @@ impl GameState {
                 _ => unreachable!(),
             };
             let neighbors = self.field.mines.sum_neighbors(index);
-            let content = match (is_opened, is_mined, neighbors) {
-                (false, ..) => "  ".to_string().with(bg_color),
-                (true, true, ..) => " *".to_string().with(red),
-                (true, false, 0) => "  ".to_string().with(bg_color),
-                (true, false, ..) => format!(" {}", neighbors).with(blue),
+            let content = match (is_opened, is_flagged, is_mined, neighbors) {
+                (false, false, ..) => "  ".to_string().with(bg_color),
+                (false, true, ..) => " P".to_string().with(red),
+                (true, _, true, ..) => " *".to_string().with(red),
+                (true, _, false, 0) => "  ".to_string().with(bg_color),
+                (true, _, false, ..) => format!(" {}", neighbors).with(blue),
             };
             queue!(
                 self.stdout,
@@ -278,6 +288,26 @@ impl GameState {
             )?;
         }
         queue!(self.stdout, ResetColor)?;
+        Ok(())
+    }
+
+    fn draw_status(&mut self) -> std::io::Result<()> {
+        let status_line = format!(
+            "Flags: {:03}",
+            self.field.n_mines as i32 - self.field.count_flags() as i32
+        );
+        queue!(
+            self.stdout,
+            MoveTo(0, 0),
+            Clear(ClearType::CurrentLine),
+            Print(status_line),
+        )?;
+        Ok(())
+    }
+
+    fn draw(&mut self) -> std::io::Result<()> {
+        self.draw_status()?;
+        self.draw_field()?;
         Ok(())
     }
 
@@ -322,7 +352,6 @@ fn main() -> std::io::Result<()> {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => break,
-            Event::Key(event) => game.handle_key(&event),
             Event::Mouse(event) => game.handle_mouse(&event),
             _ => continue,
         }?;
