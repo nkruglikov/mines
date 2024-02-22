@@ -1,7 +1,7 @@
 //! Minesweeper game
 
 use std::cmp::min;
-use std::io::{stdout, Write};
+use std::io::{stdout, ErrorKind, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
@@ -11,9 +11,10 @@ use crossterm::event::{
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::tty::IsTty;
 use crossterm::{
     execute, queue,
-    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
+    style::{Color, Print, PrintStyledContent, ResetColor, Stylize},
 };
 use rand::prelude::*;
 use rand::seq::index::sample;
@@ -33,7 +34,7 @@ impl Grid {
     fn new(size: IndexPair) -> Self {
         Self {
             data: vec![false; (size.row * size.col).into()],
-            size: size,
+            size,
         }
     }
 
@@ -47,50 +48,48 @@ impl Grid {
 
     fn sum_neighbors(&self, index: IndexPair) -> u16 {
         self.around(index)
-            .map(|(_, value)| if value { 1 } else { 0 })
+            .map(|index| if self.get(index) { 1 } else { 0 })
             .sum()
     }
 
     fn around(&self, index: IndexPair) -> GridIterator {
-        GridIterator::around(&self, index)
+        GridIterator::around(self.size, index)
     }
 }
 
-struct GridIterator<'a> {
-    grid: &'a Grid,
+struct GridIterator {
     start_index: IndexPair,
     end_index: IndexPair,
     current_index: IndexPair,
 }
 
-impl<'a> GridIterator<'a> {
-    fn new(grid: &'a Grid, start_index: IndexPair, end_index: IndexPair) -> Self {
+impl GridIterator {
+    fn new(start_index: IndexPair, end_index: IndexPair) -> Self {
         Self {
-            grid: grid,
-            start_index: start_index,
-            end_index: end_index,
+            start_index,
+            end_index,
             current_index: start_index,
         }
     }
-    fn all(grid: &'a Grid) -> Self {
-        Self::new(grid, IndexPair { row: 0, col: 0 }, grid.size)
+    fn all(size: IndexPair) -> Self {
+        Self::new(IndexPair { row: 0, col: 0 }, size)
     }
 
-    fn around(grid: &'a Grid, index: IndexPair) -> Self {
+    fn around(size: IndexPair, index: IndexPair) -> Self {
         let start_index = IndexPair {
             row: index.row.saturating_sub(1),
             col: index.col.saturating_sub(1),
         };
         let end_index = IndexPair {
-            row: min(index.row + 2, grid.size.row),
-            col: min(index.col + 2, grid.size.col),
+            row: min(index.row + 2, size.row),
+            col: min(index.col + 2, size.col),
         };
-        Self::new(grid, start_index, end_index)
+        Self::new(start_index, end_index)
     }
 }
 
-impl Iterator for GridIterator<'_> {
-    type Item = (IndexPair, bool);
+impl Iterator for GridIterator {
+    type Item = IndexPair;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_index.row >= self.end_index.row {
@@ -102,65 +101,132 @@ impl Iterator for GridIterator<'_> {
             self.current_index.col = self.start_index.col;
             self.current_index.row += 1;
         }
-        return Some((index, self.grid.get(index)));
+        Some(index)
+    }
+}
+
+struct Field {
+    size: IndexPair,
+    n_mines: u16,
+    are_mines_allocated: bool,
+
+    mines: Grid,
+    opened: Grid,
+    //flags: Grid,
+}
+
+struct FieldItem {
+    is_opened: bool,
+    is_mined: bool,
+}
+
+impl Field {
+    fn new(size: IndexPair, n_mines: u16) -> Self {
+        Self {
+            size,
+            n_mines,
+            are_mines_allocated: false,
+
+            mines: Grid::new(size),
+            opened: Grid::new(size),
+            //flags: Grid::new(size),
+        }
+    }
+
+    fn allocate_mines(&mut self) {
+        let mut rng = thread_rng();
+        for index in sample(&mut rng, self.mines.data.len(), self.n_mines.into()) {
+            self.mines.data[index] = true;
+        }
+        self.are_mines_allocated = true;
+    }
+
+    fn handle_click(&mut self, index: IndexPair) {
+        if !self.are_mines_allocated {
+            self.allocate_mines();
+        }
+        self.open_at(index);
+    }
+
+    fn open_at(&mut self, index: IndexPair) {
+        if self.opened.get(index) {
+            return;
+        }
+        self.opened.set(index, true);
+        if self.mines.get(index) || self.mines.sum_neighbors(index) > 0 {
+            return;
+        }
+        for index in self.opened.around(index) {
+            if !self.opened.get(index) && !self.mines.get(index) {
+                self.open_at(index);
+            }
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (IndexPair, FieldItem)> + '_ {
+        let iterator = GridIterator::all(self.size);
+        iterator.map(|index| {
+            (
+                index,
+                FieldItem {
+                    is_opened: self.opened.get(index),
+                    is_mined: self.mines.get(index),
+                },
+            )
+        })
     }
 }
 
 struct GameState {
-    mines: Grid,
-    opened: Grid,
+    field: Field,
     stdout: std::io::Stdout,
     start: IndexPair,
 }
 
 impl GameState {
     fn new(size: IndexPair, n_mines: u16) -> Self {
-        let mut result = Self {
-            mines: Grid::new(size),
-            opened: Grid::new(size),
+        Self {
+            field: Field::new(size, n_mines),
             stdout: stdout(),
             start: IndexPair { row: 1, col: 1 },
-        };
-        let mut rng = thread_rng();
-        for index in sample(&mut rng, result.mines.data.len(), n_mines.into()) {
-            result.mines.data[index] = true;
         }
-        result
     }
 
-    fn handle_key(&mut self, event: &KeyEvent) {
-        self.report(format!("{:?}", event).as_str());
+    fn handle_key(&mut self, event: &KeyEvent) -> std::io::Result<()> {
+        self.report(format!("{:?}", event).as_str())?;
+        Ok(())
     }
 
-    fn handle_mouse(&mut self, event: &MouseEvent) {
-        self.report(format!("{:?}", event).as_str());
+    fn handle_mouse(&mut self, event: &MouseEvent) -> std::io::Result<()> {
+        self.report(format!("{:?}", event).as_str())?;
         if let MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: col,
-            row: row,
+            column,
+            row,
             ..
         } = event
         {
             if let Some(index) = self.convert_absolute_to_relative(IndexPair {
                 row: *row,
-                col: *col,
+                col: *column,
             }) {
-                open_field(&mut self.opened, &self.mines, index);
+                self.field.handle_click(index);
             }
         }
+        Ok(())
     }
 
-    fn report(&mut self, text: &str) {
+    fn report(&mut self, text: &str) -> std::io::Result<()> {
         queue!(
             self.stdout,
             MoveTo(0, 0),
             Clear(ClearType::CurrentLine),
             Print(text),
-        );
+        )?;
+        Ok(())
     }
 
-    fn draw(&mut self) {
-        let black = Color::AnsiValue(16);
+    fn draw(&mut self) -> std::io::Result<()> {
         let blue = Color::AnsiValue(21);
         let red = Color::AnsiValue(196);
         let white_opened = Color::AnsiValue(231);
@@ -168,43 +234,41 @@ impl GameState {
         let white_closed = Color::AnsiValue(48);
         let grey_closed = Color::AnsiValue(41);
 
-        for row in 0..self.mines.size.row {
-            queue!(self.stdout, MoveTo(self.start.col, self.start.row + row));
-            for col in 0..self.mines.size.col {
-                let index = IndexPair { row: row, col: col };
-                if !self.opened.get(index) {
-                    let bg_color = if (col + row) % 2 == 0 {
-                        grey_closed
-                    } else {
-                        white_closed
-                    };
-                    queue!(self.stdout, SetBackgroundColor(bg_color), Print("  "));
-                    continue;
-                }
-                let bg_color = if (col + row) % 2 == 0 {
-                    grey_opened
-                } else {
-                    white_opened
-                };
-                queue!(self.stdout, SetBackgroundColor(bg_color));
-                if self.mines.get(index) {
-                    queue!(self.stdout, SetForegroundColor(red), Print(" X"));
-                } else {
-                    let n = self.mines.sum_neighbors(index);
-                    let msg = if n > 0 {
-                        format!(" {}", n)
-                    } else {
-                        "  ".to_string()
-                    };
-                    queue!(self.stdout, SetForegroundColor(blue), Print(msg.as_str()));
-                }
-            }
+        for (
+            index,
+            FieldItem {
+                is_opened,
+                is_mined,
+            },
+        ) in self.field.iter()
+        {
+            let bg_color = match (is_opened, (index.col + index.row) % 2) {
+                (true, 0) => grey_opened,
+                (true, 1) => white_opened,
+                (false, 0) => grey_closed,
+                (false, 1) => white_closed,
+                _ => unreachable!(),
+            };
+            let neighbors = self.field.mines.sum_neighbors(index);
+            let content = match (is_opened, is_mined, neighbors) {
+                (false, ..) => "  ".to_string().with(bg_color),
+                (true, true, ..) => " *".to_string().with(red),
+                (true, false, 0) => "  ".to_string().with(bg_color),
+                (true, false, ..) => format!(" {}", neighbors).with(blue),
+            };
+            queue!(
+                self.stdout,
+                MoveTo(self.start.col + 2 * index.col, self.start.row + index.row),
+                PrintStyledContent(content.on(bg_color))
+            )?;
         }
-        queue!(self.stdout, ResetColor);
+        queue!(self.stdout, ResetColor)?;
+        Ok(())
     }
 
-    fn flush(&mut self) {
-        let _ = self.stdout.flush();
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdout.flush()?;
+        Ok(())
     }
 
     fn convert_absolute_to_relative(&self, old_coords: IndexPair) -> Option<IndexPair> {
@@ -213,7 +277,7 @@ impl GameState {
                 row: old_coords.row - self.start.row,
                 col: (old_coords.col - self.start.col) / 2,
             };
-            if new_coords.row < self.mines.size.row && new_coords.col < self.mines.size.col {
+            if new_coords.row < self.field.size.row && new_coords.col < self.field.size.col {
                 return Some(new_coords);
             }
         }
@@ -222,25 +286,11 @@ impl GameState {
     }
 }
 
-fn open_field(opened: &mut Grid, mines: &Grid, index: IndexPair) {
-    if opened.get(index) {
-        return;
-    }
-    opened.set(index, true);
-    if mines.get(index) || mines.sum_neighbors(index) > 0 {
-        return;
-    }
-    for r in index.row.saturating_sub(1)..=min(index.row + 1, opened.size.col - 1) {
-        for c in index.col.saturating_sub(1)..=min(index.col + 1, opened.size.row - 1) {
-            let index = IndexPair { row: r, col: c };
-            if !opened.get(index) && !mines.get(index) {
-                open_field(opened, mines, index);
-            }
-        }
-    }
-}
-
 fn main() -> std::io::Result<()> {
+    if !stdout().is_tty() {
+        return Err(std::io::Error::new(ErrorKind::Other, "not a tty!"));
+    }
+
     // setup terminal
     enable_raw_mode()?;
     execute!(stdout(), EnableMouseCapture, EnterAlternateScreen, Hide)?;
@@ -249,8 +299,8 @@ fn main() -> std::io::Result<()> {
 
     // event loop
     loop {
-        game.draw();
-        game.flush();
+        game.draw()?;
+        game.flush()?;
         match read()? {
             Event::Key(KeyEvent {
                 code: KeyCode::Char('c'),
@@ -260,7 +310,7 @@ fn main() -> std::io::Result<()> {
             Event::Key(event) => game.handle_key(&event),
             Event::Mouse(event) => game.handle_mouse(&event),
             _ => continue,
-        }
+        }?;
     }
 
     // teardown terminal
