@@ -16,7 +16,7 @@ use crossterm::terminal::{
 use crossterm::tty::IsTty;
 use crossterm::{
     execute, queue,
-    style::{Color, Print, PrintStyledContent, ResetColor, Stylize},
+    style::{Color, PrintStyledContent, ResetColor, Stylize},
 };
 use rand::prelude::*;
 
@@ -61,6 +61,12 @@ impl Grid {
 
     fn around(&self, index: IndexPair) -> GridIterator {
         GridIterator::around(self.size, index)
+    }
+
+    fn count(&self) -> u16 {
+        GridIterator::all(self.size)
+            .map(|index| self.get(index) as u16)
+            .sum()
     }
 }
 
@@ -128,6 +134,12 @@ struct FieldItem {
     is_flagged: bool,
 }
 
+#[derive(PartialEq)]
+enum ClickResult {
+    Safe,
+    Exploded,
+}
+
 impl Field {
     fn new(size: IndexPair, n_mines: u16) -> Self {
         Self {
@@ -157,19 +169,26 @@ impl Field {
         self.are_mines_allocated = true;
     }
 
-    fn handle_click(&mut self, index: IndexPair) {
+    fn handle_click(&mut self, index: IndexPair) -> ClickResult {
         if !self.are_mines_allocated {
             self.allocate_mines(index);
         }
         if !self.flags.get(index) {
             self.open_at(index);
+            if !self.mines.get(index) {
+                return ClickResult::Safe;
+            } else {
+                return ClickResult::Exploded;
+            }
         }
+        ClickResult::Safe
     }
 
-    fn handle_force_click(&mut self, index: IndexPair) {
+    fn handle_force_click(&mut self, index: IndexPair) -> ClickResult {
         if !self.opened.get(index) {
             self.flags.set(index, !self.flags.get(index));
         }
+        ClickResult::Safe
     }
 
     fn open_at(&mut self, index: IndexPair) {
@@ -201,18 +220,20 @@ impl Field {
             )
         })
     }
+}
 
-    fn count_flags(&self) -> u16 {
-        GridIterator::all(self.size)
-            .map(|index| if self.flags.get(index) { 1 } else { 0 })
-            .sum()
-    }
+#[derive(PartialEq)]
+enum GameStatus {
+    InProgress,
+    Win,
+    Loss,
 }
 
 struct GameState {
     field: Field,
     stdout: std::io::Stdout,
     start: IndexPair,
+    status: GameStatus,
 }
 
 impl GameState {
@@ -221,10 +242,14 @@ impl GameState {
             field: Field::new(size, n_mines),
             stdout: stdout(),
             start: IndexPair { row: 1, col: 1 },
+            status: GameStatus::InProgress,
         }
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> std::io::Result<()> {
+        if self.status != GameStatus::InProgress {
+            return Ok(());
+        }
         let mouse_index = IndexPair {
             row: event.row,
             col: event.column,
@@ -240,13 +265,35 @@ impl GameState {
         else {
             return Ok(());
         };
-        match (*button, *modifiers) {
+        let click_result = match (*button, *modifiers) {
             (MouseButton::Left, KeyModifiers::NONE) => self.field.handle_click(index),
             (MouseButton::Left, KeyModifiers::SHIFT) => self.field.handle_force_click(index),
             (MouseButton::Right, KeyModifiers::NONE) => self.field.handle_force_click(index),
-            _ => (),
+            _ => ClickResult::Safe,
+        };
+        if click_result == ClickResult::Exploded {
+            self.lose_game();
+        }
+        if self.check_for_win() {
+            self.win_game();
         }
         Ok(())
+    }
+
+    fn lose_game(&mut self) {
+        self.status = GameStatus::Loss;
+        // TODO: Show undiscovered mines
+    }
+
+    fn check_for_win(&self) -> bool {
+        let n_opened = self.field.opened.count();
+        let n_total = self.field.size.row * self.field.size.col;
+
+        self.field.n_mines == (n_total - n_opened)
+    }
+
+    fn win_game(&mut self) {
+        self.status = GameStatus::Win;
     }
 
     fn draw_field(&mut self) -> std::io::Result<()> {
@@ -292,15 +339,24 @@ impl GameState {
     }
 
     fn draw_status(&mut self) -> std::io::Result<()> {
-        let status_line = format!(
-            "Flags: {:03}",
-            self.field.n_mines as i32 - self.field.count_flags() as i32
-        );
+        let white = Color::AnsiValue(231);
+        let red = Color::AnsiValue(196);
+        let green = Color::AnsiValue(46);
+
+        let status_line = match self.status {
+            GameStatus::InProgress => format!(
+                "Flags: {:03}",
+                self.field.n_mines as i32 - self.field.flags.count() as i32
+            )
+            .with(white),
+            GameStatus::Win => String::from("You won!").with(green),
+            GameStatus::Loss => String::from("You lost!").with(red),
+        };
         queue!(
             self.stdout,
             MoveTo(0, 0),
             Clear(ClearType::CurrentLine),
-            Print(status_line),
+            PrintStyledContent(status_line),
         )?;
         Ok(())
     }
