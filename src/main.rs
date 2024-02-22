@@ -1,7 +1,9 @@
 //! Minesweeper game
 
 use std::cmp::min;
+use std::collections::HashSet;
 use std::io::{stdout, ErrorKind, Write};
+use std::iter::FromIterator;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
@@ -17,9 +19,8 @@ use crossterm::{
     style::{Color, Print, PrintStyledContent, ResetColor, Stylize},
 };
 use rand::prelude::*;
-use rand::seq::index::sample;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, Hash, PartialEq)]
 struct IndexPair {
     row: u16,
     col: u16,
@@ -38,12 +39,18 @@ impl Grid {
         }
     }
 
+    fn position(&self, index: IndexPair) -> usize {
+        (index.row * self.size.col + index.col) as usize
+    }
+
     fn get(&self, index: IndexPair) -> bool {
-        self.data[(index.row * self.size.col + index.col) as usize]
+        let position = self.position(index);
+        self.data[position]
     }
 
     fn set(&mut self, index: IndexPair, value: bool) {
-        self.data[(index.row * self.size.col + index.col) as usize] = value
+        let position = self.position(index);
+        self.data[position] = value
     }
 
     fn sum_neighbors(&self, index: IndexPair) -> u16 {
@@ -133,17 +140,25 @@ impl Field {
         }
     }
 
-    fn allocate_mines(&mut self) {
+    fn allocate_mines(&mut self, starting_index: IndexPair) {
+        let excluded_indices: HashSet<IndexPair> =
+            HashSet::from_iter(self.mines.around(starting_index));
+        let mut indices: Vec<_> = GridIterator::all(self.size)
+            .filter(|x| !excluded_indices.contains(x))
+            .collect();
+
         let mut rng = thread_rng();
-        for index in sample(&mut rng, self.mines.data.len(), self.n_mines.into()) {
-            self.mines.data[index] = true;
+        indices.shuffle(&mut rng);
+
+        for index in &indices[..self.n_mines as usize] {
+            self.mines.set(*index, true);
         }
         self.are_mines_allocated = true;
     }
 
     fn handle_click(&mut self, index: IndexPair) {
         if !self.are_mines_allocated {
-            self.allocate_mines();
+            self.allocate_mines(index);
         }
         self.open_at(index);
     }
